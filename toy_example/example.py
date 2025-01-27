@@ -1,5 +1,7 @@
 """
-
+A toy script for learning the map from $\exp(-x^2 - y^2)$ to $\sin(2\pi x) \sin(2\pi y)$
+on the domain $[-1, 1]^2$ using the PDIAE-Net model. 
+The model is trained on three different different discretizations: 32 x 32, 64 x 64, and 128 x 128.
 """
 
 from pdiaenet import PDIAE_Net
