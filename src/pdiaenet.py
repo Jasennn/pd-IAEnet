@@ -1,3 +1,7 @@
+"""
+Module containing code for pd-IAEnet architecture
+for 2-dimensional input and 2-dimensional output data.
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,7 +18,25 @@ if FNO_POSTPROCESSING:
     FNO_MODES = 12
 REDUCER_HIDDEN_WIDTH = 128
 class PDIAE_Net(nn.Module):
-    def __init__(self, in_channels, out_channels, width=64, k_rank=2, modes=12, num_blocks=4):
+    def __init__(self, in_channels, out_channels, width=64, k_rank=3, modes=12, num_blocks=4):
+        """
+        Initializes the pd-IAEnet architecture.
+
+        Parameters
+        ----------
+        in_channels : int
+            The number of input features. 
+        out_channels : int
+            The number of output features.
+        width : int, optional
+            The number of channels to use for intermediate layers, by default 64
+        k_rank : int, optional
+            The level of approximation of $\mathcal{A}(x, \xi)$, by default 3
+        modes : int, optional
+            The number of frequency components retained after the encoder, by default 12
+        num_blocks : int, optional
+            The number of multi-channel pd-IAE blocks, by default 4
+        """
         super().__init__()
         
         self.channel_raiser = nn.Linear(in_channels, width)
@@ -34,13 +56,20 @@ class PDIAE_Net(nn.Module):
         self.channel_reducer1 = nn.Linear(width, REDUCER_HIDDEN_WIDTH)
         self.channel_reducer2 = nn.Linear(REDUCER_HIDDEN_WIDTH, out_channels)
         
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor):    
         """
+        Forward pass of the pd-IAEnet architecture.
 
         Parameters
         ----------
-        x : Tensor of shape (batch_size, in_channels, s1, s2)
-        """
+        x : Tensor
+            Shape (batch_size, in_channels, s1, s2), where s1 and s2 are the spatial dimensions and are free to vary.
+
+        Returns
+        -------
+        Tensor
+            Shape (batch_size, out_channels, s1, s2)
+        """              
         
         # Raise channel dimension
         x = x.movedim(1, -1) # (b, s1, s2, in_channels)
@@ -77,6 +106,24 @@ IDENTITY_MAP = True
 DROPOUT_PROB = 0.1
 class PDIAE_MultiChannel(nn.Module):
     def __init__(self, in_channels, out_channels, k_rank, modes, expansion_factor, activation=F.relu):
+        """
+        Initializes a multi-channel pd-IAE block.
+
+        Parameters
+        ----------
+        in_channels : int
+            The number of input channels to the multi-channel pd-IAE block, typically the width of the architecture.
+        out_channels : int
+            The number of output channels to the multi-channel pd-IAE block, typically the width of the architecture.
+        k_rank : int
+            The level of approximation of $\mathcal{A}(x, \xi)$ in the pseudo-differential operator.
+        modes : int
+            The number of frequency components retained after the encoder.
+        expansion_factor : int
+            The multiplicative factor for the number of channels applied in the skip connection layer.
+        activation : function, optional
+            The type of activation function used in post processing, by default F.relu.
+        """
         super().__init__()
         
         self.skip_connection_layer = nn.Conv1d(in_channels * expansion_factor, in_channels, 1)
@@ -107,6 +154,21 @@ class PDIAE_MultiChannel(nn.Module):
         self.activation = activation
         
     def forward(self, x_list: list[Tensor]):
+        """
+        The forward pass of the multi-channel pd-IAE block.
+
+        Parameters
+        ----------
+        x_list : list[Tensor]
+            Each element has shape (batch_size, in_channels, s1, s2).
+            The list of all previous sequential inputs to the multi-channel pd-IAE block.
+
+        Returns
+        -------
+        list[Tensor]
+            Output is appended to input list.
+            Each element has shape (batch_size, out_channels, s1, s2).       
+        """
         x: Tensor = torch.cat(x_list, dim=1)
         x_shape = x.shape # (b, (block num)*c, s1, s2)
         
@@ -151,6 +213,16 @@ class PDIAE_MultiChannel(nn.Module):
         
 class PDIAE_IdentityChannel(nn.Module):
     def __init__(self, k_rank: int, modes: int):
+        """
+        The channel that applies the identity map before applying the encoder-model-decoder architecture.
+
+        Parameters
+        ----------
+        k_rank : int
+            The level of approximation of $\mathcal{A}(x, \xi)$ in the pseudo-differential operator.
+        modes : int
+            The number of frequency components retained after the encoder.
+        """
         super().__init__()
         
         self.encoder = PDIAE_Encoder(k_rank, modes)
@@ -158,6 +230,19 @@ class PDIAE_IdentityChannel(nn.Module):
         self.decoder = PDIAE_Decoder(k_rank, modes)
         
     def forward(self, x: Tensor):
+        """
+        Applies the encoder-model-decoder architecture to the input.
+
+        Parameters
+        ----------
+        x : Tensor
+            Shape (batch_size, channels, s1, s2), where s1 and s2 are the spatial dimensions and are free to vary.
+
+        Returns
+        -------
+        Tensor
+            Shape (batch_size, channels, s1, s2)
+        """
         target_size = (x.shape[2], x.shape[3])
         x = self.encoder(x)
         x = self.fixed_model(x)
@@ -168,10 +253,33 @@ class PDIAE_IdentityChannel(nn.Module):
 
 class PDIAE_FourierChannel(PDIAE_IdentityChannel):
     def __init__(self, k_rank, modes):
+        """
+        The channel that applies the fourier transform before applying the encoder-model-decoder architecture.
+        Inverse fourier transform is applied after the decoder.
+
+        Parameters
+        ----------
+        k_rank : int
+            The level of approximation of $\mathcal{A}(x, \xi)$ in the pseudo-differential operator.
+        modes : int
+            The number of frequency components retained after the encoder.
+        """
         super().__init__(k_rank, modes)
 
     def forward(self, x: Tensor):
-        
+        """
+        Applies FFT before and inverse FFT after the encoder-model-decoder architecture.
+
+        Parameters
+        ----------
+        x : Tensor
+            Shape (batch_size, channels, s1, s2), where s1 and s2 are the spatial dimensions and are free to vary.
+
+        Returns
+        -------
+        Tensor
+            Shape (batch_size, channels, s1, s2)
+        """
         # Fourier Channel Transform
         x_shape = x.shape # real(b, c, s1, s2)
         x = torch.fft.rfft2(x, norm='ortho') # complex(b, c, s1, s2/2)
@@ -189,6 +297,16 @@ class PDIAE_FourierChannel(PDIAE_IdentityChannel):
 
 class PDIAE_Encoder(nn.Module):
     def __init__(self, k_rank: int, modes: int):
+        """
+        The encoder for the pd-IAEnet architecture.
+
+        Parameters
+        ----------
+        k_rank : int
+            The level of approximation of $\mathcal{A}(x, \xi)$ in the pseudo-differential operator.
+        modes : int
+            The number of frequency components retained after the encoder.
+        """
         super().__init__()
         
         self.k_rank = k_rank
@@ -198,6 +316,19 @@ class PDIAE_Encoder(nn.Module):
         self.freq_net = KRankNets(k_rank)
         
     def forward(self, x: Tensor):
+        """
+        Applies pointwise product in spatial domain, Fourier transform, and pointwise product in frequency domain.
+
+        Parameters
+        ----------
+        x : Tensor
+            Shape (batch_size, channels, s1, s2), where s1 and s2 are the spatial dimensions and are free to vary.
+
+        Returns
+        -------
+        Tensor
+            Shape (batch_size, channels, s1, s2), where only `modes` frequency components are non-zero.
+        """
         
         # Pointwise product in spatial domain
         x_shape = x.shape # (b, c, s1, s2)
@@ -222,6 +353,24 @@ class PDIAE_Encoder(nn.Module):
         return trunc_x
         
 def rep_modes(x: Tensor, modes: int, axes: list[int]):
+    """
+    Repeats the input tensor along the specified axes to match the desired number of modes.
+
+    Parameters
+    ----------
+    x : Tensor
+        Shape (batch_size, channels, s1, s2//2, k_rank).
+        One axis is cut in half due to symmetry in Fourier transform.
+    modes : int
+        The number of frequency components retained after the encoder.
+    axes : list[int]
+        The axes to repeat the tensor along.
+
+    Returns
+    -------
+    Tensor
+        Repeats the input tensor if specifed axes are less than the desired number of modes.
+    """
     repetitions = [1] * x.ndim
     for ax in axes:
         if modes > x.shape[ax]:
@@ -230,6 +379,16 @@ def rep_modes(x: Tensor, modes: int, axes: list[int]):
 
 class PDIAE_Decoder(nn.Module):
     def __init__(self, k_rank: int, modes: int):
+        """
+        The decoder for the pd-IAEnet architecture.
+
+        Parameters
+        ----------
+        k_rank : int
+            The level of approximation of $\mathcal{A}(x, \xi)$ in the pseudo-differential operator.
+        modes : int
+            The number of frequency components retained after the encoder.
+        """
         super().__init__()
         
         self.k_rank = k_rank
@@ -239,7 +398,22 @@ class PDIAE_Decoder(nn.Module):
         self.freq_net = KRankNets(k_rank)
         
     def forward(self, trunc_x: Tensor, target_size: tuple[int, int]):
-        
+        """
+        Applies pointwise product in frequency domain, inverse Fourier transform, and pointwise product in spatial domain.
+        Output dimension is implicitly controlled by padding/truncating of input tensor before applying inverse Fourier Transform.
+
+        Parameters
+        ----------
+        trunc_x : Tensor
+            Shape (batch_size, channels, s1, s2), where only `modes` frequency components are non-zero.
+        target_size : tuple[int, int]
+            The desired output spatial dimension of the decoder.
+
+        Returns
+        -------
+        Tensor
+            Shape (batch_size, channels, t1, t2) where t1 and t2 are the target spatial dimensions.
+        """
         # Pointwise product in frequency domain
         trunc_x = trunc_x.unsqueeze(-1).repeat(1, 1, 1, 1, self.k_rank) # (b, c, s1, s2/2, k)
         freq = freq_grid2([target_size[0], target_size[1]], trunc_x.device) # (s1, s2/2, 2)
@@ -263,6 +437,14 @@ class PDIAE_Decoder(nn.Module):
 KRANK_HIDDENLAYERS = [64]
 class KRankNets(nn.Module):
     def __init__(self, k_rank: int):
+        """
+        The K different neural networks used to approximate the kernel $\mathcal{A}(x, \xi)$ in the pseudo-differential operator.
+
+        Parameters
+        ----------
+        k_rank : int
+            The level of approximation of $\mathcal{A}(x, \xi)$ in the pseudo-differential operator (K).
+        """
         super().__init__()
         
         self.k_rank = k_rank
@@ -278,16 +460,18 @@ class KRankNets(nn.Module):
             
     def forward(self, grid: Tensor):
         """
+        The forward pass of the K different neural networks.
 
         Parameters
         ----------
-        grid : Tensor of shape (s1, s2, DIM)
-            _description_
+        grid : Tensor
+            Shape (s1, s2, 2), where 2 is the dimension of the grid.
+            The coordinates of the spatial or frequency grid.
 
         Returns
         -------
-        _type_
-            _description_
+        Tensor
+            Shape (s1, s2, k_rank).
         """
         
         grid_shape = grid.shape
@@ -300,12 +484,42 @@ class KRankNets(nn.Module):
         
 
 def spatial_grid2(shape: list[int], device: str):
+    """
+    Generates a uniform spatial grid for the given shape.
+
+    Parameters
+    ----------
+    shape : list[int]
+        List of spatial dimensions.
+    device : str
+        The device.
+
+    Returns
+    -------
+    Tensor
+        Shape (s1, s2, 2), where 2 is the dimension of the grid.
+    """
     s1 = torch.linspace(0, 1, shape[0], device=device).unsqueeze(-1).repeat(1, shape[1]) # s1 coords (s1, s2)
     s2 = torch.linspace(0, 1, shape[1], device=device).unsqueeze(0).repeat(shape[0], 1) # s2 coords (s1, s2)
     grid = torch.stack([s1, s2], dim=-1)
     return grid
 
 def freq_grid2(shape: list[int], device: str):
+    """
+    Generates a uniform frequency grid for the given shape.
+
+    Parameters
+    ----------
+    shape : list[int]
+        List of spatial dimensions.
+    device : str
+        The device.
+
+    Returns
+    -------
+    Tensor
+        Shape (s1, s2//2, 2), where s2//2 comes from handling frequency domains after Fourier Transform.
+    """
     xi1 = torch.fft.fftfreq(shape[0], device=device).unsqueeze(-1).repeat(1, shape[1] // 2 + 1)
     xi2 = torch.fft.rfftfreq(shape[1], device=device).unsqueeze(0).repeat(shape[0], 1)
     freq = torch.stack([xi1, xi2], dim=-1)
@@ -314,6 +528,14 @@ def freq_grid2(shape: list[int], device: str):
 
 class ModesFNN(nn.Module):
     def __init__(self, modes: int):
+        """
+        The fixed model that processes the non-zero frequency components after the encoder.
+
+        Parameters
+        ----------
+        modes : int
+            The number of frequency components retained after the encoder.
+        """
         super().__init__()
         
         self.modes = modes
@@ -321,6 +543,19 @@ class ModesFNN(nn.Module):
         self.fixed_model2 = FNN(modes)
     
     def forward(self, x: Tensor):
+        """
+        Processes the 'two low-frequency corners' of the input in the frequency domain.
+
+        Parameters
+        ----------
+        x : Tensor
+            The input tensor with shape (batch_size, channels, s1, s2//2).
+
+        Returns
+        -------
+        Tensor
+            Shape (batch_size, channels, s1, s2//2)
+        """
         out = torch.zeros_like(x, device=x.device, dtype=x.dtype)
         out[..., :self.modes, :self.modes] = self.fixed_model1(x[..., :self.modes, :self.modes])
         out[..., -self.modes:, :self.modes] = self.fixed_model2(x[..., -self.modes:, :self.modes])
@@ -330,6 +565,14 @@ class ModesFNN(nn.Module):
 FNN_HIDDEN = [64]
 class FNN(nn.Module):
     def __init__(self, modes):
+        """
+        A fully connected neural network that processes `one low-frequency corner` of the input.
+
+        Parameters
+        ----------
+        modes : int
+            The number of frequency components retained after the encoder.
+        """
         super().__init__()
         
         layer_dims = [modes**2] + FNN_HIDDEN + [modes**2]
@@ -341,6 +584,20 @@ class FNN(nn.Module):
             )
 
     def forward(self, x: Tensor):
+        """
+        Forward pass of fully-connected neural network. 
+        Use ReLU activation function for real and imaginary parts separately.
+
+        Parameters
+        ----------
+        x : Tensor
+            Shape (batch_size, channels, modes, modes).
+
+        Returns
+        -------
+        Tensor
+            Shape (batch_size, channels, modes, modes).
+        """
         x_shape = x.shape # (b, c, m, m)
         x = x.reshape(x.shape[0], x.shape[1], -1) # (b, c, m^2)
         for linear in self.linears:
