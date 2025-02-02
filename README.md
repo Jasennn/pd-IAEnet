@@ -1,5 +1,5 @@
 ## Requirements
-- PyTorch >=2.0
+- PyTorch: 2.0+
 
 ## Installation
 Run `pip install -e .` in the base directory (where `setup.py` is located). 
